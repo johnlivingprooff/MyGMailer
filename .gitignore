@@ -1,0 +1,18 @@
+.env
+node_modules/
+dist/
+# Logs
+logs
+npm-debug.log*
+# Dependency directories
+jspm_packages/
+# Optional npm cache directory
+.npm
+# Optional REPL history
+.repl
+# Optional eslint cache
+.eslintcache
+# Optional stylelint cache
+.stylelintcache
+# Optional cache directories
+.cache/
