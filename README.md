@@ -1,6 +1,6 @@
-# MyGMailer
+# 81Mailer
 
-MyGMailer is a tool designed to help users manage and automate their Gmail interactions efficiently. With MyGMailer, you can send, receive, and organize emails programmatically, making it ideal for developers and power users who want to streamline their email workflows.
+81Mailer is a bulk emailing tool that sends personalised emails via the Resend API. Compose once with `{{name}}`-style variables, load recipients from CSV, and send each contact an individual email with live progress.
 
 ## Features
 

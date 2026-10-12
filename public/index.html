@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>81Mailer — Bulk Emailer</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo-badge" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></span>
+    <div>
+      <h1>81Mailer</h1>
+      <p>Bulk emailer · Resend</p>
+    </div>
+  </div>
+  <div class="conn">
+    <span id="connDot" class="dot unknown" title="connection status"></span>
+    <span id="connText">Not checked</span>
+    <button id="verifyBtn" class="btn ghost sm" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>Check API</button>
+  </div>
+</header>
+
+<div class="notice">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+  <span>Sending via <strong>Resend</strong> — verify your domain (<code>eiteone.org</code>) in the Resend dashboard and set
+  <code>MAIL_FROM</code> to an address on it. Free plan: <strong>100 emails/day</strong>. Each recipient still gets an individual personalised email.</span>
+</div>
+
+<main class="layout">
+  <!-- Compose -->
+  <section class="card">
+    <h2>1 · Compose</h2>
+
+    <div class="row2">
+      <label>From name
+        <input id="fromName" type="text" placeholder="e.g. John at Eiteone" autocomplete="off" />
+      </label>
+      <label>Reply-to <span class="muted">(optional)</span>
+        <input id="replyTo" type="email" placeholder="replies go here" autocomplete="off" />
+      </label>
+    </div>
+
+    <label>Subject <span class="muted">— supports {{name}}, {{email}}, {{any_csv_column}}</span>
+      <input id="subject" type="text" placeholder="e.g. Hello {{name}} — quick update" />
+    </label>
+
+    <label>CC <span class="muted">(optional — comma-separated, copied on every email, not personalised)</span>
+      <input id="cc" type="text" placeholder="e.g. boss@eiteone.org, archive@eiteone.org" autocomplete="off" />
+    </label>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="text" type="button">Plain text</button>
+      <button class="tab" data-tab="html" type="button">HTML</button>
+      <div class="tab-actions">
+        <button class="chip" data-insert="{{name}}" type="button">{{name}}</button>
+        <button class="chip" data-insert="{{email}}" type="button">{{email}}</button>
+      </div>
+    </div>
+
+    <textarea id="bodyText" rows="10" placeholder="Hi {{name}},&#10;&#10;Just a quick note...&#10;&#10;— John"></textarea>
+    <textarea id="bodyHtml" rows="10" class="hidden" placeholder="<p>Hi {{name}},</p><p>Just a quick note...</p>"></textarea>
+    <label class="check"><input id="sendBoth" type="checkbox" checked /> Send both text + HTML (recommended — better deliverability)</label>
+
+    <details class="preview">
+      <summary>Live preview (first recipient)</summary>
+      <div class="preview-meta"><strong>To:</strong> <span id="pvTo">—</span></div>
+      <div class="preview-meta"><strong>CC:</strong> <span id="pvCc">—</span></div>
+      <div class="preview-meta"><strong>Subject:</strong> <span id="pvSubject">—</span></div>
+      <iframe id="pvHtml" class="hidden" sandbox="allow-same-origin" title="HTML email preview"></iframe>
+      <pre id="pvBody">—</pre>
+    </details>
+  </section>
+
+  <!-- Recipients -->
+  <section class="card">
+    <h2>2 · Recipients <span id="countBadge" class="badge">0</span></h2>
+
+    <div class="row2">
+      <input id="manualEmail" type="email" placeholder="email@example.com" />
+      <input id="manualName" type="text" placeholder="Name (optional)" />
+    </div>
+    <button id="addBtn" class="btn secondary" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>Add recipient</button>
+
+    <label class="mt">Paste emails <span class="muted">(one per line, or <code>email, name</code>)</span>
+      <textarea id="pasteBox" rows="4" placeholder="ada@example.com, Ada&#10;grace@example.com"></textarea>
+    </label>
+    <div class="row">
+      <button id="importPasteBtn" class="btn ghost" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M5 21h14"/></svg>Import pasted</button>
+      <label class="btn ghost file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>Upload CSV <input id="csvFile" type="file" accept=".csv,.txt" hidden /></label>
+    </div>
+    <p class="muted small">CSV: first row can be headers like <code>email,name,company</code>. Extra columns become <code>{{company}}</code> variables for personalisation.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Email</th><th>Name / vars</th><th></th></tr></thead>
+        <tbody id="recipBody"><tr class="empty"><td colspan="3">No recipients yet — add, paste or upload a CSV.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row between">
+      <button id="clearBtn" class="btn link" type="button">Clear all</button>
+      <button id="sampleBtn" class="btn link" type="button">Load demo data</button>
+    </div>
+  </section>
+
+  <!-- Send -->
+  <section class="card full">
+    <h2>3 · Send</h2>
+    <div class="send-grid">
+      <label>Delay between emails <strong><span id="delayVal">1</span>s</strong>
+        <input id="delay" type="range" min="0" max="15" step="1" value="1" />
+      </label>
+      <div class="est muted">Estimated time: <strong id="estTime">0s</strong> for <span id="estCount">0</span> recipients</div>
+      <button id="sendBtn" class="btn primary big" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>Send bulk email</button>
+    </div>
+    <div class="progress hidden" id="progressWrap">
+      <div class="progress-bar"><div id="progressFill"></div></div>
+      <div id="progressText" class="muted small">Sending…</div>
+    </div>
+    <div id="status" class="status" role="status"></div>
+    <div class="row">
+      <button id="retryBtn" class="btn ghost hidden" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>Retry failed only</button>
+      <button id="exportBtn" class="btn ghost hidden" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>Export results CSV</button>
+    </div>
+    <ul id="log" class="log"></ul>
+  </section>
+</main>
+
+<footer>Sent via <code>Resend</code> · Each recipient gets an individual personalised email · <span id="senderLine"></span></footer>
+
+<script src="app.js"></script>
+</body>
+</html>
