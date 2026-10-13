@@ -3,13 +3,16 @@ const express = require('express');
 const { Resend } = require('resend');
 const cors = require('cors');
 const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config();
+const db = require('./db'); // Postgres audit store (batches, messages, events)
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json({ limit: '30mb' }));
+// `verify` stashes the exact raw bytes so Svix webhook signatures can be checked.
+app.use(express.json({ limit: '30mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ limit: '30mb', extended: true }));
 
 // ---- Helpers ----
@@ -106,6 +109,40 @@ function renderTemplate(str = '', vars = {}) {
   });
 }
 
+// ---- Audit trail: Postgres via db.js (batches, messages, webhook events). ----
+// Tables are auto-created on boot; the server refuses to start if Postgres
+// is unreachable (fail fast — a silent fallback would diverge from reality).
+
+// Verify Resend (Svix) webhook signatures without extra deps.
+// Unsigned requests are accepted only when no secret is configured (local dev).
+function verifySvix(req) {
+  const secret = process.env.RESEND_WEBHOOK_SECRET || '';
+  if (!secret) return { ok: true, unverified: true };
+  const id = req.header('svix-id');
+  const ts = req.header('svix-timestamp');
+  const sig = req.header('svix-signature');
+  if (!id || !ts || !sig) return { ok: false, reason: 'missing svix-id / svix-timestamp / svix-signature headers' };
+  const t = Number(ts);
+  if (!Number.isFinite(t) || Math.abs(Math.floor(Date.now() / 1000) - t) > 300) {
+    return { ok: false, reason: 'stale timestamp (replay protection)' };
+  }
+  let key;
+  try {
+    key = Buffer.from(secret.startsWith('whsec_') ? secret.slice(6) : secret, 'base64');
+    if (!key.length) throw new Error('empty');
+  } catch {
+    return { ok: false, reason: 'RESEND_WEBHOOK_SECRET is not valid base64' };
+  }
+  const raw = req.rawBody != null ? req.rawBody.toString('utf8') : JSON.stringify(req.body || {});
+  const expected = crypto.createHmac('sha256', key).update(`${id}.${ts}.${raw}`).digest('base64');
+  const ok = String(sig).split(' ').some((s) => {
+    const v = s.startsWith('v1,') ? s.slice(3) : s;
+    try { return crypto.timingSafeEqual(Buffer.from(v), Buffer.from(expected)); }
+    catch { return false; }
+  });
+  return ok ? { ok: true } : { ok: false, reason: 'signature mismatch' };
+}
+
 // ---- Health / config ----
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -155,7 +192,7 @@ app.post('/api/send-email', async (req, res) => {
     return res.status(400).json({ success: false, message: err.message });
   }
   try {
-    const { error } = await getResend().emails.send({
+    const { data: resendData, error } = await getResend().emails.send({
       from: getFrom(),
       replyTo: email,
       to: process.env.MAIL_FROM,
@@ -165,6 +202,23 @@ app.post('/api/send-email', async (req, res) => {
       ...(attachments.length ? { attachments } : {}),
     });
     if (error) throw new Error(error.message || JSON.stringify(error));
+    try {
+      await db.recordBatch({
+        id: crypto.randomUUID(),
+        kind: 'single',
+        createdAt: new Date().toISOString(),
+        subject,
+        from: getFrom(),
+        fromName: null,
+        replyTo: email,
+        cc: ccList,
+        counts: { total: 1, sent: 1, failed: 0 },
+        attachments: attachments.map((a) => ({ filename: a.filename, size: Buffer.from(a.content, 'base64').length })),
+        messages: [{ email: process.env.MAIL_FROM, name: name || null, status: 'sent', initial: 'sent', resendId: resendData?.id || null, error: null }],
+      });
+    } catch (dbErr) {
+      console.error('Audit write failed (email was sent):', dbErr.message);
+    }
     res.json({ success: true, message: 'Email sent successfully' });
   } catch (err) {
     console.error('Email sending failed:', err);
@@ -268,7 +322,7 @@ app.post('/api/send-bulk', async (req, res) => {
     try {
       // One API send per recipient so each gets a personalised copy
       // (and failures don't take down the whole batch).
-      const { error } = await resend.emails.send({
+      const { data: resendData, error } = await resend.emails.send({
         from,
         to: rcpt.name ? `"${rcpt.name}" <${rcpt.email}>` : rcpt.email,
         ...(ccList.length ? { cc: ccList } : {}),
@@ -280,11 +334,11 @@ app.post('/api/send-bulk', async (req, res) => {
       });
       if (error) throw new Error(error.message || JSON.stringify(error));
       sent++;
-      results.push({ email: rcpt.email, status: 'sent' });
+      results.push({ email: rcpt.email, status: 'sent', resendId: resendData?.id || null });
     } catch (err) {
       failed++;
       console.error(`Bulk send failed for ${rcpt.email}:`, err.message);
-      results.push({ email: rcpt.email, status: 'failed', error: err.message || String(err) });
+      results.push({ email: rcpt.email, status: 'failed', resendId: null, error: err.message || String(err) });
       // Resend rate limits come back as 429 — back off extra before continuing.
       if (/429|rate|limit|quota|too many/i.test(err.message || '')) {
         await sleep(10000);
@@ -294,15 +348,119 @@ app.post('/api/send-bulk', async (req, res) => {
     if (i < recipients.length - 1 && delayMs > 0) await sleep(delayMs);
   }
 
+  const batch = {
+    id: crypto.randomUUID(),
+    kind: 'bulk',
+    createdAt: new Date().toISOString(),
+    subject,
+    from,
+    fromName: fromName || null,
+    replyTo: replyTo || null,
+    cc: ccList,
+    counts: { total: recipients.length, sent, failed },
+    attachments: attachments.map((a) => ({ filename: a.filename, size: Buffer.from(a.content, 'base64').length })),
+    messages: results.map((r, i) => ({
+      email: r.email,
+      name: recipients[i]?.name || null,
+      status: r.status,
+      initial: r.status,
+      resendId: r.resendId || null,
+      error: r.error || null,
+    })),
+  };
+  try {
+    await db.recordBatch(batch);
+  } catch (dbErr) {
+    console.error('Audit write failed (emails were attempted):', dbErr.message);
+  }
+
   res.json({
     success: failed === 0,
     message: `Bulk send finished: ${sent} sent, ${failed} failed out of ${recipients.length}`,
     summary: { total: recipients.length, sent, failed },
+    sendId: batch.id,
     results,
   });
+});
+
+// ---- Resend webhook (delivery / bounce / open / click events) ----
+// Setup: Resend dashboard → Webhooks → add endpoint:
+//   https://<your-host>/api/webhooks/resend
+// Subscribe to: email.sent, email.delivered, email.bounced, email.complained,
+// email.opened, email.clicked, email.failed. Copy the signing secret into
+// RESEND_WEBHOOK_SECRET in .env. Without the secret, events are accepted
+// unverified (handy for local dev, not for production).
+app.post('/api/webhooks/resend', async (req, res) => {
+  const v = verifySvix(req);
+  if (!v.ok) return res.status(400).json({ success: false, message: 'Invalid webhook signature: ' + v.reason });
+  if (v.unverified) console.warn('Resend webhook accepted WITHOUT signature check (RESEND_WEBHOOK_SECRET not set)');
+  const { type, created_at, data } = req.body || {};
+  if (!type || !data) return res.status(400).json({ success: false, message: 'Invalid event payload' });
+  const svixId = req.header('svix-id') || `${type}:${data.email_id || 'unknown'}:${created_at || Date.now()}`;
+  try {
+    const result = await db.applyWebhookEvent({ svixId, type, createdAt: created_at || new Date().toISOString(), data });
+    res.json({ success: true, ...(result.deduped ? { deduped: true } : result.matched ? {} : { matched: false }) });
+  } catch (err) {
+    console.error('Webhook store failed:', err.message);
+    res.status(500).json({ success: false, message: 'Failed to store event, please retry' });
+  }
+});
+
+// ---- Analytics APIs (audit trail + Brevo/Mailchimp-style KPIs) ----
+app.get('/api/analytics/status', async (req, res) => {
+  try {
+    const s = await db.getStatus();
+    res.json({
+      ok: true,
+      ...s,
+      webhookSecretConfigured: Boolean(process.env.RESEND_WEBHOOK_SECRET),
+      webhookEndpoint: '/api/webhooks/resend',
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: 'Analytics unavailable: ' + err.message });
+  }
+});
+
+app.get('/api/analytics/summary', async (req, res) => {
+  const days = Math.max(1, Math.min(Number(req.query.days ?? 30) || 30, 365));
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  try {
+    const { kpis, series, recentEvents } = await db.getSummary(days);
+    res.json({ ok: true, days, since, kpis, series, recentEvents });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: 'Analytics unavailable: ' + err.message });
+  }
+});
+
+app.get('/api/analytics/sends', async (req, res) => {
+  const limit = Math.max(1, Math.min(Number(req.query.limit ?? 25) || 25, 100));
+  const offset = Math.max(0, Number(req.query.offset ?? 0) || 0);
+  try {
+    const { total, items } = await db.listSends(limit, offset);
+    res.json({ ok: true, total, limit, offset, items });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: 'Analytics unavailable: ' + err.message });
+  }
+});
+
+app.get('/api/analytics/sends/:id', async (req, res) => {
+  try {
+    const found = await db.getBatch(req.params.id);
+    if (!found) return res.status(404).json({ ok: false, message: 'Send batch not found' });
+    res.json({ ok: true, batch: found.batch, engagement: found.engagement });
+  } catch (err) {
+    res.status(500).json({ ok: false, message: 'Analytics unavailable: ' + err.message });
+  }
 });
 
 // Serve frontend
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.listen(PORT, () => console.log(`81Mailer bulk mailer running on port ${PORT} via Resend`));
+// Fail fast when Postgres is unreachable — the audit trail is load-bearing.
+db.initDb()
+  .then(() => app.listen(PORT, () => console.log(`81Mailer bulk mailer running on port ${PORT} via Resend`)))
+  .catch((err) => {
+    console.error('Postgres unavailable, refusing to start:', err.message);
+    console.error('Set DATABASE_URL (or PG* vars) in .env and retry.');
+    process.exit(1);
+  });

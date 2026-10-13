@@ -1,6 +1,7 @@
 // public/app.js — 81Mailer bulk mailer frontend logic
 const $ = (id) => document.getElementById(id);
-const state = { recipients: [], lastResults: [], activeTab: 'text', attachments: [] };
+const state = { recipients: [], lastResults: [], activeTab: 'text', attachments: [], view: 'compose' };
+const analytics = { sendsOffset: 0, sendsTotal: 0, loading: false };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MAX_ATTACHMENTS = 5;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -425,6 +426,7 @@ async function sendBulk(retryOnly) {
       return;
     }
     state.lastResults = data.results || [];
+    if (state.view === 'analytics') loadAnalytics();
     const { sent = 0, failed = 0, total: t = total } = data.summary || {};
     $('progressText').textContent = `Done: ${sent} sent, ${failed} failed.`;
     toast(data.message, failed === 0);
@@ -451,7 +453,176 @@ $('exportBtn').addEventListener('click', () => {
   a.click();
 });
 
+// ---------- Views (Compose / Analytics) ----------
+function switchView(view) {
+  state.view = view;
+  $('composeView').classList.toggle('hidden', view !== 'compose');
+  $('analyticsView').classList.toggle('hidden', view !== 'analytics');
+  $('navCompose').classList.toggle('active', view === 'compose');
+  $('navAnalytics').classList.toggle('active', view === 'analytics');
+  if (view === 'analytics') loadAnalytics();
+}
+$('navCompose').addEventListener('click', () => switchView('compose'));
+$('navAnalytics').addEventListener('click', () => switchView('analytics'));
+
+// ---------- Analytics (audit trail + delivery & engagement KPIs) ----------
+async function apiGet(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || `Request failed (${r.status})`);
+  return j;
+}
+
+function kpiCard(label, value, sub) {
+  return `<div class="kpi"><div class="kpi-label">${escapeHtml(label)}</div>` +
+    `<div class="kpi-value">${escapeHtml(String(value))}</div>` +
+    `<div class="kpi-sub muted">${sub || ''}</div></div>`;
+}
+
+async function loadAnalytics() {
+  const days = Number($('rangeSelect').value || 30);
+  try {
+    const [status, summary] = await Promise.all([
+      apiGet('/api/analytics/status'),
+      apiGet(`/api/analytics/summary?days=${days}`),
+    ]);
+    renderWebhookBanner(status);
+    renderKpis(summary.kpis);
+    renderChart(summary.series || []);
+    analytics.sendsOffset = 0;
+    await loadSends(true);
+    $('navEventDot').classList.toggle('hidden', !(status.eventsReceived > 0));
+  } catch (err) {
+    $('webhookBanner').textContent = 'Could not load analytics: ' + err.message;
+    $('webhookBanner').className = 'webhook-banner warn small';
+  }
+}
+
+function renderWebhookBanner(status) {
+  const el = $('webhookBanner');
+  const url = location.origin + '/api/webhooks/resend';
+  $('webhookUrl').textContent = url;
+  if (status.eventsReceived > 0) {
+    el.innerHTML = `Webhook live — <strong>${status.eventsReceived}</strong> event(s) received` +
+      `${status.lastEventAt ? `, latest ${escapeHtml(status.lastEventAt)}` : ''}. Opens/clicks/bounces below are real recipient activity.`;
+    el.className = 'webhook-banner ok small';
+  } else if (!status.webhookSecretConfigured) {
+    el.innerHTML = `No delivery events yet — sends below show accepted/failed status only. ` +
+      `To get bounces, opens & clicks: set <code>RESEND_WEBHOOK_SECRET</code> and point a Resend webhook at <code>${escapeHtml(url)}</code> (setup guide below).`;
+    el.className = 'webhook-banner warn small';
+  } else {
+    el.innerHTML = `Webhook secret is configured — waiting for the first event from Resend. ` +
+      `Point a Resend webhook at <code>${escapeHtml(url)}</code> (setup guide below).`;
+    el.className = 'webhook-banner warn small';
+  }
+}
+
+function renderKpis(k) {
+  const r = k.rates || {};
+  $('kpiGrid').innerHTML =
+    kpiCard('Sent', k.accepted, `${k.batches} batch(es) · ${k.attempted} attempted`) +
+    kpiCard('Delivered', k.delivered, `${r.deliveryRate ?? 0}% delivery rate`) +
+    kpiCard('Opened', k.opened, `${r.openRate ?? 0}% open rate`) +
+    kpiCard('Clicked', k.clicked, `${r.clickRate ?? 0}% click rate`) +
+    kpiCard('Bounced', k.bounced, `${r.bounceRate ?? 0}% bounce rate`) +
+    kpiCard('Failed', k.failed, `${k.complained} complaint(s) · ${r.complaintRate ?? 0}% complaint rate`);
+}
+
+function renderChart(series) {
+  const box = $('chartBars');
+  box.innerHTML = '';
+  if (!series.length) { box.innerHTML = '<div class="muted small">No activity in range.</div>'; return; }
+  const max = Math.max(1, ...series.map((d) => d.sent));
+  const step = Math.max(1, Math.ceil(series.length / 14));
+  for (const [i, d] of series.entries()) {
+    const col = document.createElement('div');
+    col.className = 'bar-col';
+    col.title = `${d.date}: ${d.sent} sent, ${d.opened} opened, ${d.clicked} clicked, ${d.bounced} bounced`;
+    const bar = (val, cls) =>
+      `<div class="bar ${cls}" style="height:${Math.max(val > 0 ? 3 : 0, Math.round((val / max) * 100))}%"></div>`;
+    col.innerHTML =
+      `<div class="bars">${bar(d.sent, 'sent')}${bar(d.opened, 'opened')}${bar(d.clicked, 'clicked')}${bar(d.bounced, 'bounced')}</div>` +
+      `<div class="bar-date muted">${i % step === 0 ? escapeHtml(d.date.slice(5)) : ''}</div>`;
+    box.appendChild(col);
+  }
+}
+
+const STATUS_PILL = {
+  sent: 'pending', delayed: 'pending', delivered: 'sent', opened: 'sent',
+  opened_clicked: 'sent', clicked: 'sent', bounced: 'failed', complained: 'failed',
+  failed: 'failed', suppressed: 'pending',
+};
+
+async function loadSends(reset) {
+  if (analytics.loading) return;
+  analytics.loading = true;
+  try {
+    if (reset) { analytics.sendsOffset = 0; $('sendsBody').innerHTML = ''; $('sendDetail').classList.add('hidden'); }
+    const data = await apiGet(`/api/analytics/sends?limit=25&offset=${analytics.sendsOffset}`);
+    analytics.sendsTotal = data.total || 0;
+    analytics.sendsOffset += (data.items || []).length;
+    if (reset && !(data.items || []).length) {
+      $('sendsBody').innerHTML = '<tr class="empty"><td colspan="9">No sends recorded yet.</td></tr>';
+    }
+    for (const s of data.items || []) {
+      const e = s.engagement || {};
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        `<td class="nowrap">${escapeHtml(String(s.createdAt || '').slice(0, 16).replace('T', ' '))}</td>` +
+        `<td><strong>${escapeHtml(s.subject || '')}</strong></td>` +
+        `<td class="muted">${escapeHtml(s.kind || 'bulk')}</td>` +
+        `<td>${e.sent ?? 0}${e.failed ? ` <span class="muted">(+${e.failed} failed)</span>` : ''}</td>` +
+        `<td>${e.delivered ?? 0}</td><td>${e.opened ?? 0}</td><td>${e.clicked ?? 0}</td><td>${e.bounced ?? 0}</td>` +
+        `<td><button class="btn link sm" data-id="${escapeHtml(s.id)}" type="button">Details</button></td>`;
+      $('sendsBody').appendChild(tr);
+    }
+    $('sendsBody').querySelectorAll('button[data-id]').forEach((b) =>
+      b.addEventListener('click', () => showSendDetail(b.dataset.id))
+    );
+    $('sendsCount').textContent = `${Math.min(analytics.sendsOffset, analytics.sendsTotal)} of ${analytics.sendsTotal} batch(es)`;
+    $('moreSends').classList.toggle('hidden', analytics.sendsOffset >= analytics.sendsTotal);
+  } catch (err) {
+    $('sendsBody').innerHTML = `<tr class="empty"><td colspan="9">Could not load sends: ${escapeHtml(err.message)}</td></tr>`;
+  } finally {
+    analytics.loading = false;
+  }
+}
+
+async function showSendDetail(id) {
+  const box = $('sendDetail');
+  box.classList.remove('hidden');
+  box.innerHTML = '<div class="muted small">Loading batch…</div>';
+  try {
+    const { batch, engagement } = await apiGet(`/api/analytics/sends/${encodeURIComponent(id)}`);
+    const msgs = batch.messages || [];
+    box.innerHTML =
+      `<div class="detail-head"><strong>${escapeHtml(batch.subject || '')}</strong>` +
+      `<span class="muted small">${escapeHtml(batch.createdAt || '')} · ${msgs.length} recipient(s)` +
+      `${(batch.attachments || []).length ? ` · ${batch.attachments.map((a) => escapeHtml(a.filename)).join(', ')}` : ''}</span></div>` +
+      `<div class="table-wrap"><table><thead><tr><th>Recipient</th><th>Status</th><th>Last event</th><th>Opens / clicks</th><th>Error / bounce</th></tr></thead><tbody>` +
+      (msgs.map((m) => {
+        const pill = STATUS_PILL[m.status] || 'pending';
+        const label = String(m.status || 'sent').replace('_', ' + ');
+        return `<tr><td><strong>${escapeHtml(m.email)}</strong>${m.name ? `<div class="vars">${escapeHtml(m.name)}</div>` : ''}</td>` +
+          `<td><span class="pill ${pill}">${escapeHtml(label)}</span></td>` +
+          `<td class="muted small">${escapeHtml(m.lastEvent ? `${m.lastEvent} · ${m.lastEventAt || ''}` : '—')}</td>` +
+          `<td class="muted small">${m.openCount || 0} / ${m.clickCount || 0}</td>` +
+          `<td class="err-msg">${escapeHtml(m.error || m.bounce?.message || '')}</td></tr>`;
+      }).join('') || '<tr class="empty"><td colspan="5">No messages.</td></tr>') +
+      `</tbody></table></div>`;
+    box.scrollIntoView({ block: 'nearest' });
+  } catch (err) {
+    box.innerHTML = `<div class="err-msg">Could not load batch: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+$('rangeSelect').addEventListener('change', loadAnalytics);
+$('refreshAnalytics').addEventListener('click', loadAnalytics);
+$('moreSends').addEventListener('click', () => loadSends(false));
+
 // init
 renderRecipients();
 renderAttachments();
 checkSmtp(true);
+// Keep analytics fresh while it's on screen (webhook events land any time).
+setInterval(() => { if (state.view === 'analytics' && !analytics.loading) loadAnalytics(); }, 30000);

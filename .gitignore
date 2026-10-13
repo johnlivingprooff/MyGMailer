@@ -1,6 +1,8 @@
 .env
 node_modules/
 dist/
+# Audit trail (contains recipient emails + engagement data)
+data/
 # Logs
 logs
 npm-debug.log*

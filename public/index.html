@@ -15,6 +15,10 @@
       <p>Bulk emailer · Resend</p>
     </div>
   </div>
+  <nav class="nav" aria-label="Main">
+    <button id="navCompose" class="navbtn active" type="button">Compose</button>
+    <button id="navAnalytics" class="navbtn" type="button">Analytics <span id="navEventDot" class="navdot hidden" title="webhook events received"></span></button>
+  </nav>
   <div class="conn">
     <span id="connDot" class="dot unknown" title="connection status"></span>
     <span id="connText">Not checked</span>
@@ -28,7 +32,7 @@
   <code>MAIL_FROM</code> to an address on it. Free plan: <strong>100 emails/day</strong>. Each recipient still gets an individual personalised email.</span>
 </div>
 
-<main class="layout">
+<main class="layout" id="composeView">
   <!-- Compose -->
   <section class="card">
     <h2>1 · Compose</h2>
@@ -133,6 +137,61 @@
       <button id="exportBtn" class="btn ghost hidden" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>Export results CSV</button>
     </div>
     <ul id="log" class="log"></ul>
+  </section>
+</main>
+
+<main class="alayout hidden" id="analyticsView">
+  <!-- Analytics header / setup status -->
+  <section class="card full">
+    <div class="analytics-head">
+      <h2>Analytics <span class="muted small">— audit trail + delivery & engagement</span></h2>
+      <div class="row analytics-controls">
+        <select id="rangeSelect" aria-label="Date range">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <button id="refreshAnalytics" class="btn ghost sm" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>Refresh</button>
+      </div>
+    </div>
+    <div id="webhookBanner" class="webhook-banner muted small">Checking webhook status…</div>
+    <div class="kpi-grid" id="kpiGrid"></div>
+  </section>
+
+  <!-- Activity chart -->
+  <section class="card full">
+    <h2>Activity</h2>
+    <div class="legend muted small"><span><i class="sw sent"></i>Sent</span><span><i class="sw opened"></i>Opened</span><span><i class="sw clicked"></i>Clicked</span><span><i class="sw bounced"></i>Bounced</span></div>
+    <div id="chartBars" class="chart"></div>
+  </section>
+
+  <!-- Audit trail -->
+  <section class="card full">
+    <h2>Audit trail <span class="muted small">— every batch sent from this tool</span></h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Date</th><th>Subject</th><th>Type</th><th>Sent</th><th>Delivered</th><th>Opened</th><th>Clicked</th><th>Bounced</th><th></th></tr></thead>
+        <tbody id="sendsBody"><tr class="empty"><td colspan="9">No sends recorded yet.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row between">
+      <span id="sendsCount" class="muted small"></span>
+      <button id="moreSends" class="btn link hidden" type="button">Show more</button>
+    </div>
+    <div id="sendDetail" class="send-detail hidden"></div>
+  </section>
+
+  <!-- Setup guide -->
+  <section class="card full">
+    <details class="setup">
+      <summary>Enable bounces, opens & clicks (2-minute Resend setup)</summary>
+      <ol class="muted">
+        <li>In the <strong>Resend dashboard → Webhooks</strong>, add endpoint <code id="webhookUrl">/api/webhooks/resend</code> and subscribe to <code>email.sent</code>, <code>email.delivered</code>, <code>email.bounced</code>, <code>email.complained</code>, <code>email.opened</code>, <code>email.clicked</code>, <code>email.failed</code>.</li>
+        <li>Copy the webhook <strong>signing secret</strong> into <code>RESEND_WEBHOOK_SECRET</code> in your <code>.env</code> and restart the server.</li>
+        <li>For open/click tracking: <strong>Resend dashboard → Domains → your domain → Configuration</strong>, add a tracking subdomain (e.g. <code>links</code>), add the shown <code>CNAME</code> DNS record and verify. Tracking is off until that DNS step is done.</li>
+        <li>Note: this server must be reachable from the internet (deploy it or use a tunnel) for Resend to deliver events. Until then, sends are still logged here with accepted/failed status.</li>
+      </ol>
+    </details>
   </section>
 </main>
 
