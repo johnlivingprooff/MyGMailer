@@ -158,6 +158,19 @@ tr.empty td { color: var(--muted); text-align: center; padding: 18px; }
 .rm svg { width: 15px; height: 15px; }
 .vars { color: var(--muted); font-size: 12px; }
 
+.attach-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.attach-list:empty { margin: 0; }
+.attach-row {
+  display: flex; gap: 10px; align-items: center;
+  border: 1px solid var(--line); border-radius: 12px;
+  padding: 7px 10px; background: rgba(0, 0, 0, 0.3); font-size: 13.5px;
+}
+.attach-row svg { width: 15px; height: 15px; flex: none; color: var(--brand); }
+.attach-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.attach-row .rm { margin-left: auto; }
+#attachTotal { margin-top: 6px; }
+#attachTotal:empty { display: none; }
+
 .send-grid { display: flex; gap: 18px; align-items: end; flex-wrap: wrap; }
 .send-grid label { min-width: 220px; flex: 1; }
 .est { flex: 1; min-width: 180px; }

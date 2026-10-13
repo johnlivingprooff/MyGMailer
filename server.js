@@ -9,7 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ limit: '30mb', extended: true }));
 
 // ---- Helpers ----
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -39,6 +40,59 @@ function parseAddressList(input) {
     out.push(email);
   }
   return out;
+}
+
+// ---- Attachments (Resend: same files sent with every email) ----
+// Expected shape from the client: [{ filename, content (base64), contentType? }]
+// Limits keep us under Resend's ~40MB/email cap and avoid huge JSON bodies.
+const MAX_ATTACHMENTS = 5;
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 10MB per file (decoded)
+const MAX_TOTAL_BYTES = 20 * 1024 * 1024; // 20MB total (decoded)
+
+function parseAttachments(input) {
+  if (input === undefined || input === null || input === '') return { attachments: [], totalBytes: 0 };
+  if (!Array.isArray(input)) throw new Error('attachments must be an array of { filename, content }');
+  if (input.length > MAX_ATTACHMENTS) {
+    throw new Error(`Too many attachments (${input.length}). Max ${MAX_ATTACHMENTS} files per send.`);
+  }
+  const attachments = [];
+  let totalBytes = 0;
+  for (const [idx, file] of input.entries()) {
+    const filename = String(file?.filename || '').trim().replace(/[\\/]+/g, '_').slice(0, 255);
+    if (!filename) throw new Error(`Attachment #${idx + 1}: filename is required`);
+    let content = String(file?.content || '');
+    if (!content) throw new Error(`Attachment "${filename}": content is empty`);
+    // Accept full data URLs ("data:application/pdf;base64,....") or raw base64.
+    const b64 = content.includes(',') && content.includes(';base64') ? content.split(',').pop() : content;
+    const clean = b64.replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9+/=_-]+$/.test(clean)) {
+      throw new Error(`Attachment "${filename}": content must be base64-encoded`);
+    }
+    let byteLen;
+    try {
+      byteLen = Buffer.from(clean, 'base64').length;
+    } catch {
+      throw new Error(`Attachment "${filename}": content is not valid base64`);
+    }
+    if (byteLen === 0) throw new Error(`Attachment "${filename}": content is empty`);
+    if (byteLen > MAX_FILE_BYTES) {
+      throw new Error(
+        `Attachment "${filename}" is ${(byteLen / 1024 / 1024).toFixed(1)}MB — max ${(MAX_FILE_BYTES / 1024 / 1024).toFixed(0)}MB per file`
+      );
+    }
+    totalBytes += byteLen;
+    attachments.push({
+      filename,
+      content: clean,
+      ...(file?.contentType ? { contentType: String(file.contentType).slice(0, 127) } : {}),
+    });
+  }
+  if (totalBytes > MAX_TOTAL_BYTES) {
+    throw new Error(
+      `Attachments total ${(totalBytes / 1024 / 1024).toFixed(1)}MB — max ${(MAX_TOTAL_BYTES / 1024 / 1024).toFixed(0)}MB per send`
+    );
+  }
+  return { attachments, totalBytes };
 }
 
 // Replace {{key}} placeholders with recipient vars (case-insensitive keys).
@@ -89,11 +143,17 @@ app.get('/api/verify', async (req, res) => {
 
 // ---- Single email (kept for backwards compat) ----
 app.post('/api/send-email', async (req, res) => {
-  const { name, email, subject, message, cc } = req.body;
+  const { name, email, subject, message, cc, attachments: rawAttachments } = req.body;
   if (!subject || !message || !email) {
     return res.status(400).json({ success: false, message: 'email, subject and message are required' });
   }
   const ccList = parseAddressList(cc);
+  let attachments = [];
+  try {
+    ({ attachments } = parseAttachments(rawAttachments));
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message });
+  }
   try {
     const { error } = await getResend().emails.send({
       from: getFrom(),
@@ -102,6 +162,7 @@ app.post('/api/send-email', async (req, res) => {
       ...(ccList.length ? { cc: ccList } : {}),
       subject,
       text: `From: ${name || 'Unknown'} <${email}>\n\n${message}`,
+      ...(attachments.length ? { attachments } : {}),
     });
     if (error) throw new Error(error.message || JSON.stringify(error));
     res.json({ success: true, message: 'Email sent successfully' });
@@ -120,10 +181,11 @@ app.post('/api/send-email', async (req, res) => {
 //   fromName: "Acme" (optional),
 //   replyTo: "optional@x.com" (optional),
 //   cc: ["cc@x.com"] or "cc@x.com, other@y.com" (optional, applied to every email),
+//   attachments: [{ filename, content (base64), contentType? }] (optional, same files for every recipient),
 //   delayMs: 500 (optional, default 500 - Resend is fast, small delay is polite)
 // }
 app.post('/api/send-bulk', async (req, res) => {
-  let { recipients, subject, text, html, fromName, replyTo, cc, delayMs } = req.body;
+  let { recipients, subject, text, html, fromName, replyTo, cc, delayMs, attachments: rawAttachments } = req.body;
 
   if (!process.env.RESEND_API_KEY || !process.env.MAIL_FROM) {
     return res.status(500).json({
@@ -179,6 +241,14 @@ app.post('/api/send-bulk', async (req, res) => {
     return true;
   });
 
+  // Validate attachments once (same files go to every recipient).
+  let attachments = [];
+  try {
+    ({ attachments } = parseAttachments(rawAttachments));
+  } catch (err) {
+    return res.status(400).json({ success: false, message: err.message });
+  }
+
   delayMs = Math.max(0, Math.min(Number(delayMs ?? 500) || 0, 60000));
 
   const resend = getResend();
@@ -206,6 +276,7 @@ app.post('/api/send-bulk', async (req, res) => {
         ...(personalText ? { text: personalText } : {}),
         ...(personalHtml ? { html: personalHtml } : {}),
         ...(replyTo ? { replyTo } : {}),
+        ...(attachments.length ? { attachments } : {}),
       });
       if (error) throw new Error(error.message || JSON.stringify(error));
       sent++;

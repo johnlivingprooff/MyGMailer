@@ -1,7 +1,10 @@
 // public/app.js — 81Mailer bulk mailer frontend logic
 const $ = (id) => document.getElementById(id);
-const state = { recipients: [], lastResults: [], activeTab: 'text' };
+const state = { recipients: [], lastResults: [], activeTab: 'text', attachments: [] };
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_ATTACHMENTS = 5;
+const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 
 // Inline SVG status icons (stroke = currentColor, coloured via CSS per row)
 const svgWrap = (inner, cls = '') =>
@@ -172,6 +175,88 @@ $('sampleBtn').addEventListener('click', () => {
   renderRecipients();
 });
 
+// ---------- Attachments (same files for every recipient) ----------
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function attachmentTotalBytes() {
+  return state.attachments.reduce((s, a) => s + (a.size || 0), 0);
+}
+
+function renderAttachments() {
+  const list = $('attachList');
+  list.innerHTML = '';
+  state.attachments.forEach((a, i) => {
+    const row = document.createElement('div');
+    row.className = 'attach-row';
+    row.innerHTML =
+      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>` +
+      `<span class="attach-name">${escapeHtml(a.filename)}</span>` +
+      `<span class="muted small">${escapeHtml(formatBytes(a.size || 0))}</span>` +
+      `<button class="rm" data-i="${i}" title="Remove attachment">${ICON_X}</button>`;
+    list.appendChild(row);
+  });
+  list.querySelectorAll('.rm').forEach((b) =>
+    b.addEventListener('click', () => { state.attachments.splice(Number(b.dataset.i), 1); renderAttachments(); updatePreview(); })
+  );
+  const total = attachmentTotalBytes();
+  $('attachTotal').textContent = state.attachments.length
+    ? `${state.attachments.length} file(s) · ${formatBytes(total)} total — sent with every email`
+    : '';
+  $('clearAttachBtn').classList.toggle('hidden', state.attachments.length === 0);
+  updatePreview();
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',').pop() : dataUrl;
+      resolve(base64);
+    };
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+$('attachInput').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = '';
+  if (!files.length) return;
+  for (const file of files) {
+    if (state.attachments.length >= MAX_ATTACHMENTS) {
+      toast(`Max ${MAX_ATTACHMENTS} attachments — "${file.name}" skipped`, false);
+      continue;
+    }
+    if (file.size > MAX_FILE_BYTES) {
+      toast(`"${file.name}" is ${formatBytes(file.size)} — max ${formatBytes(MAX_FILE_BYTES)} per file`, false);
+      continue;
+    }
+    if (attachmentTotalBytes() + file.size > MAX_TOTAL_BYTES) {
+      toast(`"${file.name}" skipped — total would exceed ${formatBytes(MAX_TOTAL_BYTES)}`, false);
+      continue;
+    }
+    try {
+      const content = await readFileAsBase64(file);
+      state.attachments.push({
+        filename: file.name,
+        content,
+        contentType: file.type || undefined,
+        size: file.size,
+      });
+    } catch (err) {
+      toast(err.message, false);
+    }
+  }
+  renderAttachments();
+});
+
+$('clearAttachBtn').addEventListener('click', () => { state.attachments = []; renderAttachments(); });
+
 // ---------- Preview / estimates ----------
 function renderTemplate(str, vars) {
   const lower = {};
@@ -184,6 +269,9 @@ function updatePreview() {
   $('pvTo').textContent = r.name ? `${r.name} <${r.email}>` : r.email;
   $('pvCc').textContent = $('cc').value.trim() || '—';
   $('pvSubject').textContent = renderTemplate($('subject').value || '(no subject)', r);
+  $('pvAttach').textContent = state.attachments.length
+    ? state.attachments.map((a) => `${a.filename} (${formatBytes(a.size || 0)})`).join(', ')
+    : '—';
   const htmlSrc = $('bodyHtml').value.trim();
   const textSrc = $('bodyText').value.trim();
   // Rendered HTML (like a real inbox, on white) when the HTML tab is active
@@ -281,6 +369,9 @@ async function sendBulk(retryOnly) {
   if (!recipients.length) return toast('Add at least one recipient first.', false);
   if (!subject) return toast('Subject is required.', false);
   if (!text && !html) return toast('Write a message body first.', false);
+  if (attachmentTotalBytes() > MAX_TOTAL_BYTES) {
+    return toast(`Attachments exceed ${formatBytes(MAX_TOTAL_BYTES)} total — remove a file first.`, false);
+  }
 
   const btn = $('sendBtn');
   btn.disabled = true;
@@ -316,6 +407,9 @@ async function sendBulk(retryOnly) {
         fromName: $('fromName').value.trim() || undefined,
         replyTo: $('replyTo').value.trim() || undefined,
         ...(cc ? { cc } : {}),
+        ...(state.attachments.length
+          ? { attachments: state.attachments.map(({ filename, content, contentType }) => ({ filename, content, contentType })) }
+          : {}),
         delayMs,
       }),
     });
@@ -359,4 +453,5 @@ $('exportBtn').addEventListener('click', () => {
 
 // init
 renderRecipients();
+renderAttachments();
 checkSmtp(true);

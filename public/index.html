@@ -63,11 +63,20 @@
     <textarea id="bodyHtml" rows="10" class="hidden" placeholder="<p>Hi {{name}},</p><p>Just a quick note...</p>"></textarea>
     <label class="check"><input id="sendBoth" type="checkbox" checked /> Send both text + HTML (recommended — better deliverability)</label>
 
+    <label class="mt">Attachments <span class="muted">(optional — same files for everyone · max 5 files · 10MB each · 20MB total)</span></label>
+    <div class="row">
+      <label class="btn ghost file"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>Attach files <input id="attachInput" type="file" multiple hidden /></label>
+      <button id="clearAttachBtn" class="btn link hidden" type="button">Clear attachments</button>
+    </div>
+    <div id="attachList" class="attach-list"></div>
+    <div id="attachTotal" class="muted small"></div>
+
     <details class="preview">
       <summary>Live preview (first recipient)</summary>
       <div class="preview-meta"><strong>To:</strong> <span id="pvTo">—</span></div>
       <div class="preview-meta"><strong>CC:</strong> <span id="pvCc">—</span></div>
       <div class="preview-meta"><strong>Subject:</strong> <span id="pvSubject">—</span></div>
+      <div class="preview-meta"><strong>Attachments:</strong> <span id="pvAttach">—</span></div>
       <iframe id="pvHtml" class="hidden" sandbox="allow-same-origin" title="HTML email preview"></iframe>
       <pre id="pvBody">—</pre>
     </details>
